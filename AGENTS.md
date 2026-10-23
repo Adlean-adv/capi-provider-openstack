@@ -152,6 +152,13 @@ make docker-build-debug
 make docker-build-all
 ```
 
+### Fork image publishing
+
+- `.github/workflows/ghcr.yaml` tests and publishes `build/patched-gophercloud`
+  to `ghcr.io/adlean-adv/capi-provider-openstack:sha-<commit>` for amd64 and arm64.
+- `go.mod` pins the compatible Gophercloud fork commit with a `replace` directive.
+- Docker builds use `TARGETARCH` unless `ARCH` is explicitly supplied.
+
 ### Cleanup
 
 ```bash

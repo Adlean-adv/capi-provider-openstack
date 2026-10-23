@@ -1,0 +1,114 @@
+name: Publish to GHCR
+
+on:
+  push:
+    branches:
+    - build/patched-gophercloud
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    if: github.repository == 'Adlean-adv/capi-provider-openstack'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      go_version: ${{ steps.go.outputs.version }}
+    steps:
+    - name: Checkout
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        fetch-depth: 0
+        persist-credentials: false
+    - name: Read Go version
+      id: go
+      run: printf 'version=%s\n' "$(make go-version)" >> "$GITHUB_OUTPUT"
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ steps.go.outputs.version }}
+    - name: Verify modules
+      run: |
+        go mod verify
+        go mod tidy -diff
+    - name: Test patched Gophercloud
+      run: |
+        dependency_dir="$(go list -m -f '{{.Dir}}' github.com/gophercloud/gophercloud/v2)"
+        cd "$dependency_dir"
+        go test -mod=readonly ./openstack/utils/testing ./openstack/testing \
+          -run 'Test(GetServiceVersionsPatchVersions|ParseVersionRejectsPatchVersions|NewLoadBalancerV2WithPatchVersions)$'
+    - name: Test CAPO
+      run: make test
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+    - name: Checkout
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        fetch-depth: 0
+        persist-credentials: false
+    - name: Image metadata
+      id: meta
+      run: |
+        image="ghcr.io/${GITHUB_REPOSITORY,,}"
+        source_date_epoch="$(git show -s --format=%ct HEAD)"
+        ldflags="$(SOURCE_DATE_EPOCH="$source_date_epoch" bash ./hack/version.sh)"
+        {
+          printf 'image=%s\n' "$image"
+          printf 'tag=%s:sha-%s\n' "$image" "$GITHUB_SHA"
+          printf 'ldflags=%s -s -w\n' "$ldflags"
+        } >> "$GITHUB_OUTPUT"
+    - name: Set up Buildx
+      uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+    - name: Log in to GHCR
+      uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    - name: Build and publish
+      id: build
+      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+      with:
+        context: .
+        platforms: linux/amd64,linux/arm64
+        push: true
+        tags: ${{ steps.meta.outputs.tag }}
+        build-args: |
+          GO_VERSION=${{ needs.verify.outputs.go_version }}
+          ldflags=${{ steps.meta.outputs.ldflags }}
+        labels: |
+          org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          org.opencontainers.image.revision=${{ github.sha }}
+          org.opencontainers.image.licenses=Apache-2.0
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        provenance: mode=max
+    - name: Verify published image
+      env:
+        PUBLISHED_IMAGE: ${{ steps.meta.outputs.image }}
+        PUBLISHED_DIGEST: ${{ steps.build.outputs.digest }}
+      run: |
+        docker buildx imagetools inspect "$PUBLISHED_IMAGE@$PUBLISHED_DIGEST" --raw |
+          jq -e '[.manifests[].platform | select(.os == "linux") | .architecture] | unique == ["amd64", "arm64"]'
+        docker run --rm "$PUBLISHED_IMAGE@$PUBLISHED_DIGEST" --help >/dev/null 2>&1
+    - name: Published image
+      env:
+        PUBLISHED_IMAGE: ${{ steps.meta.outputs.image }}
+        PUBLISHED_TAG: ${{ steps.meta.outputs.tag }}
+        PUBLISHED_DIGEST: ${{ steps.build.outputs.digest }}
+      run: |
+        printf '%s\n\n%s@%s\n' "$PUBLISHED_TAG" "$PUBLISHED_IMAGE" "$PUBLISHED_DIGEST" >> "$GITHUB_STEP_SUMMARY"

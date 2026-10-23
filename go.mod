@@ -163,3 +163,5 @@ require (
 	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730 // indirect
 	sigs.k8s.io/kind v0.33.0 // indirect
 )
+
+replace github.com/gophercloud/gophercloud/v2 => github.com/Adlean-adv/gophercloud/v2 v2.14.1-0.20261023161348-a3c7c1aac65d
